@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Datos de vuelo generados por el software de PC
+*.csv
+
+# Arduino / PlatformIO
+build/
+.pio/
+
+# Sistema / editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
