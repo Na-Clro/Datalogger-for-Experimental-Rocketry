@@ -1,5 +1,15 @@
 # Cambios
 
+## 1.0.1 — 2026-10-26
+
+**Cohete**
+- La transmisión LoRa ya no bloquea el loop. Antes `endPacket()` frenaba el
+  programa ~230 ms en cada paquete y quedaba un hueco de 250 ms sin muestras
+  cada 500 ms (frecuencia efectiva ~12 Hz en vez de 20 Hz). Ahora se
+  transmite en modo asíncrono y el fin de la transmisión se detecta por el
+  pin DIO0, sin interrupciones.
+- Si el LoRa no inicia, el loop deja de usarlo (antes seguía llamándolo).
+
 ## 1.0.0 — 2026-10-14
 
 Primera versión publicada.

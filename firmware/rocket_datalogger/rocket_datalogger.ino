@@ -1,7 +1,7 @@
 /*
  * =====================================================================
  *  DATALOGGER DE COHETE - ESP32-C3 Supermini
- *  Version: 1.0.0
+ *  Version: 1.0.1
  *
  *  Sensores: MPU6050 (acelerometro/giroscopo) + BMP280 (presion/temp), I2C
  *  Memoria:  EEPROM 24LC256 por I2C
@@ -121,6 +121,18 @@ uint32_t ee_record_count = 0;
 uint32_t ee_records_since_header_update = 0;
 
 unsigned long last_tx = 0;
+
+// ---- Transmision LoRa NO bloqueante ----
+// endPacket() bloqueante frena el loop todo el tiempo en el aire (~230 ms a
+// SF9), y eso dejaba un hueco de 250 ms sin muestras cada 500 ms. Ahora se
+// transmite en modo asincrono y el fin de la transmision se detecta leyendo
+// el pin DIO0 (mapeado a TxDone), sin interrupciones.
+bool lora_ok = false;
+bool lora_tx_en_curso = false;
+unsigned long t_tx_inicio = 0;
+#define LORA_TX_TIMEOUT_MS   600UL   // margen sobre el tiempo en el aire
+#define LORA_TX_MIN_MS        30UL   // no mirar DIO0 antes de esto
+void loraTxDoneNoUsado() {}          // solo para que la libreria mapee DIO0 a TxDone
 unsigned long last_sample = 0;
 bool armado = false;
 bool recording_eeprom = false;
@@ -243,14 +255,21 @@ void setup() {
     LoRa.setPins(LORA_CS, LORA_RST, LORA_DIO0);
     if (!LoRa.begin(LORA_FREQ)) {
         // No colgamos el sistema: seguimos pudiendo grabar en EEPROM
-        // aunque no haya radio. Se reintenta cada 5s en el loop.
+        // aunque no haya radio.
         Serial.println("ERROR: LoRa no responde. Continuo sin radio.");
     } else {
         LoRa.setSpreadingFactor(9);
         LoRa.setTxPower(20);
         LoRa.setSyncWord(LORA_SYNC_WORD);
         LoRa.enableCrc();
+        // Registrar un callback de TxDone hace que endPacket(true) mapee DIO0
+        // a "TxDone". Se desengancha la interrupcion enseguida: el fin de la
+        // transmision se lee por polling del pin, sin codigo SPI en ISR (y
+        // sin que una ISR limpie los flags de RxDone antes de parsePacket()).
+        LoRa.onTxDone(loraTxDoneNoUsado);
+        detachInterrupt(digitalPinToInterrupt(LORA_DIO0));
         LoRa.receive();
+        lora_ok = true;
     }
 
     // ---- MPU6050 ----
@@ -320,8 +339,9 @@ void setup() {
 
 // =====================================================================
 void loop() {
-    // 1. COMANDOS DESDE TIERRA (armado / grabado)
-    procesarComandoLoRa();
+    // 1. COMANDOS DESDE TIERRA (armado / grabado). No se escucha mientras
+    // se transmite: parsePacket() pasaria el radio a recepcion y cortaria la TX.
+    if (lora_ok && !lora_tx_en_curso) procesarComandoLoRa();
 
     // 2. COMANDOS POR USB (bench / descarga)
     if (Serial.available()) {
@@ -409,16 +429,27 @@ void loop() {
         if (recording_eeprom) guardarEnEEPROM();
     }
 
-    // 4. TRANSMISION LORA (2 Hz) - manda la ultima muestra disponible,
-    // no vuelve a leer sensores. Esto deja ventana de sobra para recibir
-    // comandos entre paquete y paquete.
-    if (now - last_tx >= TX_INTERVAL_MS) {
+    // 4. TRANSMISION LORA (2 Hz, no bloqueante) - manda la ultima muestra
+    // disponible. Mientras esta en el aire el muestreo de 20 Hz sigue.
+    if (lora_ok && !lora_tx_en_curso && now - last_tx >= TX_INTERVAL_MS) {
         last_tx = now;
         LoRa.idle();
-        LoRa.beginPacket();
-        LoRa.write((uint8_t*)&data, sizeof(data));
-        LoRa.endPacket();
-        LoRa.receive();
+        if (LoRa.beginPacket()) {
+            LoRa.write((uint8_t*)&data, sizeof(data));
+            LoRa.endPacket(true);            // asincrono: vuelve enseguida
+            lora_tx_en_curso = true;
+            t_tx_inicio = now;
+        } else {
+            LoRa.receive();
+        }
+    }
+    if (lora_tx_en_curso) {
+        unsigned long en_aire = millis() - t_tx_inicio;
+        bool termino = (en_aire >= LORA_TX_MIN_MS && digitalRead(LORA_DIO0) == HIGH);
+        if (termino || en_aire > LORA_TX_TIMEOUT_MS) {
+            lora_tx_en_curso = false;
+            LoRa.receive();                  // volver a escuchar comandos
+        }
     }
 }
 
